@@ -1,204 +1,247 @@
 #!/usr/bin/env bash
+# ubuntu_setup_full.sh
+# Purpose: idempotent full setup for Ubuntu 24.04 (safe, robust, verbose)
 set -euo pipefail
+IFS=$'\n\t'
 
-# ==========================================
-# Ubuntu 24.04 "Noble Numbat" Setup Script
-# ==========================================
+echo
+echo "=== Ubuntu 24.04 Full Setup (idempotent) ==="
+echo
 
-echo "Starting setup... NOTE: Run this as your user, NOT root."
-echo "You will be asked for your sudo password shortly."
+# ---------------------------
+# Helpers
+# ---------------------------
+apt_install() {
+  # $1..n packages; uses --reinstall to make repeated runs safe
+  sudo apt install -y --reinstall "$@"
+}
 
-# -------------------------------
-# 0️⃣  Prep & Repositories
-# -------------------------------
-# Enable multiverse (needed for Steam/drivers)
-sudo add-apt-repository multiverse -y
-sudo dpkg --add-architecture i386
+apt_install_no_reinstall() {
+  # $1..n packages; avoids --reinstall
+  sudo apt install -y "$@"
+}
 
-# Update & upgrade
-sudo apt update && sudo apt upgrade -y
+cmd_exists() { command -v "$1" >/dev/null 2>&1; }
 
-# Install essential basics first
-sudo apt install -y curl git wget software-properties-common build-essential
+# ---------------------------
+# 0) System update + prelim
+# ---------------------------
+echo "-> update & upgrade"
+sudo apt update
+sudo apt upgrade -y
 
-# -------------------------------
-# 1️⃣  Core CLI & Modern Unix Tools
-# -------------------------------
-# fastfetch > neofetch
-# eza > ls
-# zoxide > cd
-sudo apt install -y \
-    fzf ripgrep bat btop fd-find htop tree tmux \
-    unzip zip jq net-tools fastfetch eza zoxide plocate \
-    p7zip-full unrar
+echo "-> install base tooling"
+apt_install_no_reinstall software-properties-common wget curl git build-essential \
+  dirmngr gnupg ca-certificates apt-transport-https
 
-# Fix bat and fd naming conflicts (Ubuntu specifics)
-[ ! -f ~/.local/bin/bat ] && mkdir -p ~/.local/bin && ln -s /usr/bin/batcat ~/.local/bin/bat || true
-[ ! -f ~/.local/bin/fd ] && ln -s /usr/bin/fdfind ~/.local/bin/fd || true
+# enable multiverse + i386 (needed for Steam & codecs)
+sudo add-apt-repository -y multiverse || true
+sudo dpkg --add-architecture i386 || true
 
-# -------------------------------
-# 2️⃣  Development Stacks
-# -------------------------------
+# ---------------------------
+# 1) VSCode repo (official)
+# ---------------------------
+if [ ! -f /etc/apt/keyrings/packages.microsoft.gpg ]; then
+  echo "-> add vscode official repo"
+  sudo mkdir -p /etc/apt/keyrings
+  wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor | sudo tee /etc/apt/keyrings/packages.microsoft.gpg >/dev/null
+  echo "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" \
+    | sudo tee /etc/apt/sources.list.d/vscode.list
+fi
 
-# --- Python (Miniforge3) ---
-sudo apt install -y python3 python3-venv python3-pip
+sudo apt update
+
+# ---------------------------
+# 2) Core CLI & utils
+# ---------------------------
+echo "-> install core CLI tools"
+apt_install fzf ripgrep bat btop fd-find htop tree tmux unzip zip jq net-tools \
+  eza zoxide plocate p7zip-full unrar
+
+mkdir -p "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+ln -sf /usr/bin/batcat "$HOME/.local/bin/bat"
+ln -sf /usr/bin/fdfind "$HOME/.local/bin/fd"
+
+# ---------------------------
+# 3) Python & Miniforge (Mamba)
+# ---------------------------
+echo "-> install python basics"
+apt_install python3 python3-venv python3-pip
+
 if [ ! -d "$HOME/miniforge3" ]; then
-    echo "Installing Miniforge3 (Conda/Mamba)..."
-    wget -qO Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
-    bash Miniforge3.sh -b -p "$HOME/miniforge3"
-    rm Miniforge3.sh
-    # Init for zsh (will be applied later when zsh is set up)
-    eval "$($HOME/miniforge3/bin/conda shell.zsh hook)"
-    conda init zsh
+  echo "-> installing Miniforge (mambaforge)"
+  wget -qO Miniforge3.sh "https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Linux-x86_64.sh"
+  bash Miniforge3.sh -b -p "$HOME/miniforge3"
+  rm Miniforge3.sh
+  "$HOME/miniforge3/bin/conda" init zsh || true
 fi
 
-# --- Node.js (via NVM) ---
-# Even for non-JS devs, NVM is useful for tools that depend on Node
-export NVM_DIR="$HOME/.nvm"
-if [ ! -d "$NVM_DIR" ]; then
-    echo "Installing NVM..."
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-    nvm install --lts
-    nvm use --lts
+# ---------------------------
+# 4) Node (nvm)
+# ---------------------------
+if [ ! -d "$HOME/.nvm" ]; then
+  echo "-> install nvm (Node Version Manager) and latest LTS node"
+  curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+  nvm install --lts || true
 fi
 
-# --- C++ / Build Tools ---
-sudo apt install -y \
-    cmake ninja-build clang clangd clang-format clang-tidy pkg-config gdb
+# ---------------------------
+# 5) Dev stack (C/C++, Rust, Docker, Bazel)
+# ---------------------------
+echo "-> install dev toolchain"
+apt_install cmake ninja-build clang clangd clang-format clang-tidy pkg-config gdb \
+  build-essential gh openssh-client openssh-server
 
-# --- Rust ---
-if ! command -v rustc &>/dev/null; then
-    echo "Installing Rust..."
-    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-    source "$HOME/.cargo/env"
+if ! cmd_exists rustc; then
+  echo "-> install rust (rustup)"
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-# --- Bazel (via Bazelisk) ---
-if ! command -v bazelisk &>/dev/null; then
-    echo "Installing Bazelisk..."
-    sudo wget -qO /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
-    sudo chmod +x /usr/local/bin/bazelisk
-    # Alias bazel -> bazelisk
-    if [ ! -f /usr/local/bin/bazel ]; then
-        sudo ln -s /usr/local/bin/bazelisk /usr/local/bin/bazel
-    fi
+if ! cmd_exists docker; then
+  echo "-> install docker (get.docker.com)"
+  curl -fsSL https://get.docker.com | sh
+  sudo usermod -aG docker "$USER"
 fi
 
-# -------------------------------
-# 3️⃣  Shell & Terminal
-# -------------------------------
-sudo apt install -y zsh alacritty
+if ! cmd_exists bazelisk; then
+  echo "-> install bazelisk"
+  sudo wget -qO /usr/local/bin/bazelisk https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64
+  sudo chmod +x /usr/local/bin/bazelisk
+  sudo ln -sf /usr/local/bin/bazelisk /usr/local/bin/bazel
+fi
 
-# Oh-My-Zsh
+# ---------------------------
+# 6) Shell & terminal
+# ---------------------------
+echo "-> zsh, alacritty, fonts"
+apt_install zsh alacritty fonts-powerline
+
 if [ ! -d "$HOME/.oh-my-zsh" ]; then
-    echo "Installing oh-my-zsh..."
-    sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+  echo "-> install oh-my-zsh (unattended)"
+  sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
 fi
 
-# Zsh plugins
 ZSH_CUSTOM=${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}
-git clone https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM}/plugins/zsh-autosuggestions || true
-git clone https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM}/plugins/zsh-syntax-highlighting || true
+mkdir -p "$ZSH_CUSTOM"
+[ ! -d "${ZSH_CUSTOM}/plugins/zsh-autosuggestions" ] \
+  && git clone https://github.com/zsh-users/zsh-autosuggestions "${ZSH_CUSTOM}/plugins/zsh-autosuggestions" || true
+[ ! -d "${ZSH_CUSTOM}/plugins/zsh-syntax-highlighting" ] \
+  && git clone https://github.com/zsh-users/zsh-syntax-highlighting.git "${ZSH_CUSTOM}/plugins/zsh-syntax-highlighting" || true
 
-# Starship prompt
-if ! command -v starship &>/dev/null; then
-    curl -fsSL https://starship.rs/install.sh | sh -s -- -y
+if ! cmd_exists starship; then
+  echo "-> install starship prompt"
+  curl -fsSL https://starship.rs/install.sh | sh -s -- -y
 fi
 
-# -------------------------------
-# 4️⃣  Window Manager (i3) & GUI Utils
-# -------------------------------
-# i3, Rofi, Polybar, Picom (Compositor), Feh (Wallpaper), Dunst (Notifications)
-# Lxpolkit (Authentication Agent - REQUIRED for GUI apps needing sudo)
-# Arandr (Screen Layout GUI), Network Manager Applet
-sudo apt install -y \
-    i3 rofi polybar picom feh dunst \
-    lxpolkit network-manager-gnome arandr \
-    pavucontrol brightnessctl ddcutil
+grep -q "zoxide init zsh" "$HOME/.zshrc" 2>/dev/null || echo 'eval "$(zoxide init zsh)"' >> "$HOME/.zshrc"
+grep -q "direnv hook zsh" "$HOME/.zshrc" 2>/dev/null || echo 'eval "$(direnv hook zsh)"' >> "$HOME/.zshrc"
 
-# -------------------------------
-# 5️⃣  GUI Applications
-# -------------------------------
+# ---------------------------
+# 7) Window manager + GUI utilities (Gammastep removed)
+# ---------------------------
+echo "-> install i3 + GUI utilities (without gammastep)"
+apt_install i3 rofi polybar picom feh dunst lxpolkit network-manager-gnome arandr
+apt_install pavucontrol flameshot gnome-tweaks gparted synaptic
+apt_install direnv pipx bleachbit || true
 
-# --- VS Code (Microsoft Repo) ---
-if ! command -v code &>/dev/null; then
-    echo "Installing VS Code..."
-    sudo apt-get install -y apt-transport-https
-    wget -qO- https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > packages.microsoft.gpg
-    sudo install -D -o root -g root -m 644 packages.microsoft.gpg /etc/apt/keyrings/packages.microsoft.gpg
-    sudo sh -c 'echo "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main" > /etc/apt/sources.list.d/vscode.list'
-    rm packages.microsoft.gpg
-    sudo apt update
-    sudo apt install -y code
+# ---------------------------
+# 8) Brightness control
+# ---------------------------
+echo "-> brightness tools (ddcutil + brightnessctl)"
+apt_install ddcutil brightnessctl
+sudo usermod -aG i2c "$USER" || true
+
+# set-brightness script
+sudo tee /usr/local/bin/set-brightness >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# set-brightness <0-100>  -> set hardware brightness (DDC/CI) on all monitors
+if [ $# -ne 1 ]; then
+  echo "Usage: set-brightness <0-100>"
+  exit 1
+fi
+LEVEL="$1"
+for DISP in $(ddcutil detect 2>/dev/null | awk '/Display/ {print $2}' || true); do
+  ddcutil --display "$DISP" setvcp 10 "$LEVEL" || true
+done
+EOF
+sudo chmod +x /usr/local/bin/set-brightness
+
+# set-brightness-fallback script
+sudo tee /usr/local/bin/set-brightness-fallback >/dev/null <<'EOF'
+#!/usr/bin/env bash
+# set-brightness-fallback <percent>
+if [ $# -ne 1 ]; then
+  echo "Usage: set-brightness-fallback <0-100>"
+  exit 1
+fi
+brightnessctl set "$1"%
+EOF
+sudo chmod +x /usr/local/bin/set-brightness-fallback
+
+# ---------------------------
+# 9) SSH Key Generation (Short Version)
+# ---------------------------
+SSH_DIR="$HOME/.ssh"
+SSH_KEY_FILE="$SSH_DIR/id_ed25519"
+
+# Ensure the directory exists
+mkdir -p "$SSH_DIR"
+
+# Generate key if the private key file is missing
+if [ ! -f "$SSH_KEY_FILE" ]; then
+  echo "-> Generating Ed25519 SSH Key in $SSH_DIR"
+  ssh-keygen -t ed25519 -f "$SSH_KEY_FILE" -N ''
 fi
 
-# --- Chrome (Direct .deb) ---
-if ! command -v google-chrome-stable &>/dev/null; then
-    wget https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
-    sudo apt install -y ./google-chrome-stable_current_amd64.deb
-    rm google-chrome-stable_current_amd64.deb
-fi
+# ---------------------------
+# 10) Apps
+# ---------------------------
+echo "-> installing applications"
+apt_install code steam-installer obs-studio
+apt_install flatpak gnome-software-plugin-flatpak
 
-# --- Docker (Official Script) ---
-if ! command -v docker &>/dev/null; then
-    echo "Installing Docker..."
-    curl -fsSL https://get.docker.com | sh
-    sudo usermod -aG docker "$USER"
-fi
-sudo apt install -y docker-compose-plugin
-
-# --- Flatpak & Apps ---
-sudo apt install -y flatpak gnome-software-plugin-flatpak
 flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-flatpak install -y flathub com.discordapp.Discord
-flatpak install -y flathub com.slack.Slack
+flatpak install -y --reinstall flathub com.discordapp.Discord || true
+flatpak install -y --reinstall flathub com.slack.Slack || true
+flatpak install -y --reinstall flathub com.rustdesk.RustDesk || true
 
-# --- Other Apps ---
-sudo apt install -y \
-    steam-installer obs-studio \
-    gnome-tweaks gparted synaptic flameshot gammastep \
-    direnv pipx bleachbit ufw \
-    ubuntu-restricted-extras
-
-# --- PlotJuggler (Snap) ---
-# Snap comes pre-installed on Ubuntu 24.04
-sudo snap install plotjuggler
-
-# -------------------------------
-# 6️⃣  Fonts (Nerd Fonts)
-# -------------------------------
-# Installing JetBrains Mono Nerd Font for Starship/Terminal icons
-FONT_DIR="$HOME/.local/share/fonts"
-if [ ! -d "$FONT_DIR/JetBrainsMono" ]; then
-    echo "Installing JetBrains Mono Nerd Font..."
-    mkdir -p "$FONT_DIR/JetBrainsMono"
-    wget -P "$FONT_DIR/JetBrainsMono" https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip
-    unzip "$FONT_DIR/JetBrainsMono/JetBrainsMono.zip" -d "$FONT_DIR/JetBrainsMono"
-    rm "$FONT_DIR/JetBrainsMono/JetBrainsMono.zip"
-    fc-cache -fv
+# PlotJuggler
+if ! cmd_exists plotjuggler; then
+  if cmd_exists snap; then
+    sudo snap install plotjuggler || true
+  else
+    sudo apt install -y plotjuggler || true
+  fi
 fi
 
-# -------------------------------
-# 7️⃣  Final Configuration
-# -------------------------------
-
-# Enable Firewall
-sudo ufw enable
-
-# Add zoxide and direnv to .zshrc if not present
-if ! grep -q "zoxide init zsh" "$HOME/.zshrc"; then
-    echo 'eval "$(zoxide init zsh)"' >> "$HOME/.zshrc"
-fi
-if ! grep -q "direnv hook zsh" "$HOME/.zshrc"; then
-    echo 'eval "$(direnv hook zsh)"' >> "$HOME/.zshrc"
+# ---------------------------
+# 11) Fonts
+# ---------------------------
+echo "-> install JetBrainsMono Nerd Font locally"
+FONT_DIR="$HOME/.local/share/fonts/JetBrainsMono"
+mkdir -p "$FONT_DIR"
+if [ ! -f "$FONT_DIR/JetBrainsMono.zip" ]; then
+  wget -q -P "$FONT_DIR" https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.zip
+  unzip -q "$FONT_DIR/JetBrainsMono.zip" -d "$FONT_DIR" || true
+  rm -f "$FONT_DIR/JetBrainsMono.zip"
+  fc-cache -fv || true
 fi
 
-echo "=============================================="
-echo "✅ Ubuntu 24.04 setup script completed!"
-echo "----------------------------------------------"
-echo "👉 Reboot recommended."
-echo "👉 Log in via 'i3' session (click the gear icon)."
-echo "👉 Configure 'gh auth login' manually."
-echo "👉 If VS Code fonts look weird, select 'JetBrainsMono NF' in settings."
-echo "=============================================="
+# ---------------------------
+# 12) Firewall & security
+# ---------------------------
+echo "-> firewall: allow SSH then enable UFW"
+sudo ufw allow OpenSSH
+sudo ufw --force enable || true
+
+# ---------------------------
+# 13) Final notes
+# ---------------------------
+echo
+echo "=== Setup finished ==="
+echo "- Reboot or log out/in for group changes (docker, i2c) to take effect."
+echo
